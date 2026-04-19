@@ -7,7 +7,7 @@ import { altman } from '@/lib/altman'
 const ScoreGauge = dynamic(() => import('./ScoreGauge'), { ssr: false })
 
 const ACCENT = '#17c082'
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://credit-risk-api.onrender.com'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://credit-risk-api-505q.onrender.com'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const fmt  = (n: number) => '₦' + n.toLocaleString('en-NG', { maximumFractionDigits: 0 })
