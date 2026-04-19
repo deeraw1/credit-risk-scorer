@@ -1,18 +1,25 @@
-// ── Retail Scorecard ──────────────────────────────────────────────────────────
+// ── ML Retail Input ───────────────────────────────────────────────────────────
 export interface RetailInput {
-  // identity
-  employmentType:  'salaried' | 'self-employed' | 'contract' | 'unemployed'
-  yearsEmployed:   number
+  // personal
+  age:              number
+  maritalStatus:    'Single' | 'Married' | 'Divorced'
+  education:        'HighSchool' | 'Bachelor' | 'Master' | 'PhD'
+  // employment
+  employmentType:   'Full-time' | 'Part-time' | 'Self-employed' | 'Unemployed'
+  yearsEmployed:    number
   // financials
-  monthlyIncome:   number
-  monthlyDebt:     number      // existing obligations
-  loanAmount:      number
-  tenureMonths:    number
-  interestRate:    number      // annual %
-  collateralValue: number      // 0 = unsecured
-  // history
-  creditHistory:   'excellent' | 'good' | 'fair' | 'poor' | 'none'
-  priorDefaults:   number
+  annualIncome:     number
+  monthlyDebt:      number
+  loanAmount:       number
+  tenureMonths:     number
+  interestRate:     number
+  creditScore:      number
+  numCreditLines:   number
+  // loan details
+  loanPurpose:      'Home' | 'Auto' | 'Education' | 'Business' | 'Other'
+  hasMortgage:      boolean
+  hasDependents:    boolean
+  hasCoSigner:      boolean
 }
 
 export interface ScorecardFactor {
@@ -23,17 +30,17 @@ export interface ScorecardFactor {
 }
 
 export interface RetailResult {
-  // ratios
-  dti:    number   // debt-to-income %
-  ltv:    number   // loan-to-value % (0 if unsecured)
-  dscr:   number   // debt service coverage ratio
-  emi:    number   // monthly instalment
-  // score
-  factors:    ScorecardFactor[]
-  totalScore: number            // 0–100 (higher = safer)
-  grade:      string            // AAA B+ etc.
-  pd:         number            // probability of default %
-  decision:   'Approve' | 'Review' | 'Decline'
+  // ML output
+  defaultProbability: number
+  decision:           'Approve' | 'Review' | 'Decline'
+  riskLevel:          'Low' | 'Medium' | 'High'
+  // derived client-side
+  dti:        number
+  dscr:       number
+  emi:        number
+  ltv:        number
+  grade:      string
+  totalScore: number      // 0–100 safe score (1 - PD)
   decisionColor: string
   narrative:  string[]
 }

@@ -2,13 +2,44 @@
 import { useState } from 'react'
 import dynamic from 'next/dynamic'
 import type { RetailInput, AltmanInput, RetailResult, AltmanResult } from '@/lib/types'
+import { altman } from '@/lib/altman'
 
 const ScoreGauge = dynamic(() => import('./ScoreGauge'), { ssr: false })
 
 const ACCENT = '#17c082'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://credit-risk-api.onrender.com'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-const fmt = (n: number) => '₦' + n.toLocaleString('en-NG', { maximumFractionDigits: 0 })
+const fmt  = (n: number) => '₦' + n.toLocaleString('en-NG', { maximumFractionDigits: 0 })
+const fmtN = (n: number) => n.toLocaleString('en-NG', { maximumFractionDigits: 0 })
+
+function emi(principal: number, annualRate: number, months: number): number {
+  if (annualRate === 0) return principal / months
+  const r = annualRate / 100 / 12
+  return (principal * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1)
+}
+
+function gradeFromPD(pd: number): string {
+  if (pd < 3)  return 'AAA'
+  if (pd < 7)  return 'AA'
+  if (pd < 12) return 'A'
+  if (pd < 20) return 'BBB'
+  if (pd < 35) return 'BB'
+  if (pd < 50) return 'B'
+  return 'D'
+}
+
+function gradeColor(grade: string): string {
+  if (['AAA','AA','A'].includes(grade)) return '#17c082'
+  if (['BBB','BB'].includes(grade))     return '#f59e0b'
+  return '#e74c3c'
+}
+
+function decisionColor(d: string): string {
+  if (d === 'Approve') return '#17c082'
+  if (d === 'Review')  return '#f59e0b'
+  return '#e74c3c'
+}
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
@@ -30,31 +61,14 @@ function KV({ k, v, color }: { k: string; v: string; color?: string }) {
   )
 }
 
-function FactorBar({ label, points, max, comment }: { label: string; points: number; max: number; comment: string }) {
-  const pct = (points / max) * 100
-  const color = pct >= 70 ? '#17c082' : pct >= 40 ? '#f59e0b' : '#e74c3c'
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-        <span style={{ fontSize: '0.84rem', color: 'var(--text)', fontWeight: 500 }}>{label}</span>
-        <span style={{ fontSize: '0.82rem', fontWeight: 700, color }}>{points}/{max}</span>
-      </div>
-      <div style={{ background: 'var(--border2)', borderRadius: 4, height: 6, overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: color,
-          borderRadius: 4, transition: 'width 0.4s ease' }} />
-      </div>
-      <div style={{ fontSize: '0.74rem', color: 'var(--muted)', marginTop: 4 }}>{comment}</div>
-    </div>
-  )
-}
-
 // ── defaults ──────────────────────────────────────────────────────────────────
 const defaultRetail: RetailInput = {
-  employmentType: 'salaried', yearsEmployed: 3,
-  monthlyIncome: 500_000, monthlyDebt: 50_000,
+  age: 32, maritalStatus: 'Single', education: 'Bachelor',
+  employmentType: 'Full-time', yearsEmployed: 3,
+  annualIncome: 6_000_000, monthlyDebt: 50_000,
   loanAmount: 2_000_000, tenureMonths: 24, interestRate: 22,
-  collateralValue: 0,
-  creditHistory: 'good', priorDefaults: 0,
+  creditScore: 680, numCreditLines: 3,
+  loanPurpose: 'Business', hasMortgage: false, hasDependents: false, hasCoSigner: false,
 }
 
 const defaultAltman: AltmanInput = {
@@ -71,12 +85,12 @@ const inputSt: React.CSSProperties = {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 export default function CreditApp() {
-  const [tab,       setTab]       = useState<'retail' | 'corporate'>('retail')
-  const [retail,    setRetail]    = useState<RetailInput>(defaultRetail)
-  const [altmanIn,  setAltman]    = useState<AltmanInput>(defaultAltman)
-  const [result,    setResult]    = useState<RetailResult | AltmanResult | null>(null)
-  const [loading,   setLoading]   = useState(false)
-  const [error,     setError]     = useState('')
+  const [tab,      setTab]      = useState<'retail' | 'corporate'>('retail')
+  const [retail,   setRetail]   = useState<RetailInput>(defaultRetail)
+  const [altmanIn, setAltman]   = useState<AltmanInput>(defaultAltman)
+  const [result,   setResult]   = useState<RetailResult | AltmanResult | null>(null)
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState('')
 
   function setR<K extends keyof RetailInput>(k: K, v: RetailInput[K]) {
     setRetail(p => ({ ...p, [k]: v })); setResult(null)
@@ -88,30 +102,80 @@ export default function CreditApp() {
   async function handleScore() {
     setLoading(true); setError('')
     try {
-      const body = tab === 'retail'
-        ? { mode: 'retail',     retail }
-        : { mode: 'corporate',  corporate: altmanIn }
-      const res  = await fetch('/api/score', {
+      if (tab === 'corporate') {
+        setResult(altman(altmanIn))
+        setTimeout(() => document.getElementById('result')?.scrollIntoView({ behavior: 'smooth' }), 100)
+        return
+      }
+
+      // Retail — call real ML API
+      const monthlyEmi = emi(retail.loanAmount, retail.interestRate, retail.tenureMonths)
+      const totalDebt  = retail.monthlyDebt + monthlyEmi
+      const monthlyInc = retail.annualIncome / 12
+      const dtiRatio   = monthlyInc > 0 ? (totalDebt / monthlyInc) : 0.5
+
+      const payload = {
+        Age:            retail.age,
+        Income:         retail.annualIncome,
+        LoanAmount:     retail.loanAmount,
+        CreditScore:    retail.creditScore,
+        MonthsEmployed: retail.yearsEmployed * 12,
+        NumCreditLines: retail.numCreditLines,
+        InterestRate:   retail.interestRate,
+        LoanTerm:       retail.tenureMonths,
+        DTIRatio:       Math.min(dtiRatio, 1),
+        Education:      retail.education,
+        EmploymentType: retail.employmentType,
+        MaritalStatus:  retail.maritalStatus,
+        HasMortgage:    retail.hasMortgage ? 1 : 0,
+        HasDependents:  retail.hasDependents ? 1 : 0,
+        LoanPurpose:    retail.loanPurpose,
+        HasCoSigner:    retail.hasCoSigner ? 1 : 0,
+      }
+
+      const res  = await fetch(`${API_BASE}/predict`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       })
-      const data = await res.json()
-      if (data.error) throw new Error(data.error)
-      setResult(data.result)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || 'API error')
+      }
+      const ml = await res.json()
+
+      const pd    = ml.default_probability * 100
+      const grade = gradeFromPD(pd)
+      const dColor = decisionColor(ml.decision)
+      const dscr  = totalDebt > 0 ? monthlyInc / totalDebt : 0
+      const ltv   = retail.hasMortgage ? (retail.loanAmount / retail.annualIncome) * 100 : 0
+
+      const narrative = [
+        `ML model (trained on 255,000+ loan records) estimates a ${pd.toFixed(1)}% probability of default.`,
+        `Annual income of ${fmt(retail.annualIncome)} with a monthly debt obligation of ${fmt(Math.round(totalDebt))}.`,
+        `DTI of ${(dtiRatio * 100).toFixed(1)}% — ${dtiRatio <= 0.35 ? 'within acceptable threshold' : 'above recommended 35% threshold'}.`,
+        `Debt service coverage of ${dscr.toFixed(2)}x — income ${dscr >= 1.2 ? 'adequately covers' : 'insufficient for'} obligations.`,
+        `Credit score of ${retail.creditScore} — ${retail.creditScore >= 700 ? 'strong credit profile' : retail.creditScore >= 600 ? 'moderate credit profile' : 'weak credit profile'}.`,
+        `Employment: ${retail.employmentType}, ${retail.yearsEmployed} year(s) tenure. Education: ${retail.education}.`,
+        `Decision: ${ml.decision}. Risk tier: ${ml.riskLevel}. Grade: ${grade}.`,
+      ]
+
+      setResult({
+        defaultProbability: ml.default_probability,
+        decision: ml.decision,
+        riskLevel: ml.riskLevel,
+        dti: dtiRatio * 100,
+        dscr, emi: monthlyEmi, ltv,
+        grade, totalScore: Math.round((1 - ml.default_probability) * 100),
+        decisionColor: dColor, narrative,
+      })
       setTimeout(() => document.getElementById('result')?.scrollIntoView({ behavior: 'smooth' }), 100)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally { setLoading(false) }
   }
 
-  const retailResult  = tab === 'retail'    && result ? result as RetailResult  : null
-  const altmanResult  = tab === 'corporate' && result ? result as AltmanResult  : null
-
-  const gradeColor = (grade: string) => {
-    if (['AAA','AA','A'].includes(grade))     return '#17c082'
-    if (['BBB','BB'].includes(grade))         return '#f59e0b'
-    return '#e74c3c'
-  }
+  const retailResult = tab === 'retail'    && result ? result as RetailResult  : null
+  const altmanResult = tab === 'corporate' && result ? result as AltmanResult  : null
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)', padding: '32px 16px' }}>
@@ -125,14 +189,14 @@ export default function CreditApp() {
           <div style={{ position: 'absolute', right: 40, top: -10, fontSize: 180,
             opacity: 0.05, color: '#fff', lineHeight: 1, userSelect: 'none' }}>◆</div>
           <h1 style={{ fontSize: '2.1rem', fontWeight: 800, color: '#fff', marginBottom: 8 }}>
-            Credit Risk Scorer
+            Credit Default Risk Model
           </h1>
           <p style={{ color: '#8adbb8', fontSize: '1rem', maxWidth: 560 }}>
-            Basel-aligned scorecard for retail borrowers · Altman Z-Score for corporate entities.
-            Instant grade, PD estimate, and risk narrative.
+            ML-powered default prediction for retail borrowers · Altman Z-Score for corporate entities.
+            Trained on 255,000+ real loan records — instant PD estimate, grade, and risk narrative.
           </p>
           <div style={{ marginTop: 20, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {['Scorecard Model','Altman Z-Score','DTI · LTV · DSCR','Probability of Default','Credit Grade','Risk Narrative'].map(t => (
+            {['XGBoost Model','255k Training Records','Probability of Default','Credit Grade','DTI · DSCR','Altman Z-Score'].map(t => (
               <span key={t} className="tag">{t}</span>
             ))}
           </div>
@@ -154,30 +218,79 @@ export default function CreditApp() {
         {tab === 'retail' && (
           <>
             <div className="section-label">Borrower Profile</div>
-            <div className="section-title">Retail Credit Scorecard</div>
+            <div className="section-title">ML Credit Assessment</div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(210px,1fr))', gap: 16, marginBottom: 24 }}>
+            {/* Personal */}
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
+              textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>
+              Personal Details
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 16, marginBottom: 20 }}>
+              <Field label="Age">
+                <input style={inputSt} type="number" min="18" max="80" value={retail.age}
+                  onChange={e => setR('age', +e.target.value)} />
+              </Field>
+              <Field label="Marital Status">
+                <select style={inputSt} value={retail.maritalStatus}
+                  onChange={e => setR('maritalStatus', e.target.value as RetailInput['maritalStatus'])}>
+                  <option value="Single">Single</option>
+                  <option value="Married">Married</option>
+                  <option value="Divorced">Divorced</option>
+                </select>
+              </Field>
+              <Field label="Education">
+                <select style={inputSt} value={retail.education}
+                  onChange={e => setR('education', e.target.value as RetailInput['education'])}>
+                  <option value="HighSchool">High School</option>
+                  <option value="Bachelor">Bachelor's</option>
+                  <option value="Master">Master's</option>
+                  <option value="PhD">PhD</option>
+                </select>
+              </Field>
+              <Field label="Has Dependents">
+                <select style={inputSt} value={retail.hasDependents ? 'yes' : 'no'}
+                  onChange={e => setR('hasDependents', e.target.value === 'yes')}>
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
+              </Field>
+            </div>
+
+            {/* Employment */}
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
+              textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
+              Employment
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 16, marginBottom: 20 }}>
               <Field label="Employment Type">
                 <select style={inputSt} value={retail.employmentType}
                   onChange={e => setR('employmentType', e.target.value as RetailInput['employmentType'])}>
-                  <option value="salaried">Salaried</option>
-                  <option value="self-employed">Self-Employed</option>
-                  <option value="contract">Contract</option>
-                  <option value="unemployed">Unemployed</option>
+                  <option value="Full-time">Full-time</option>
+                  <option value="Part-time">Part-time</option>
+                  <option value="Self-employed">Self-Employed</option>
+                  <option value="Unemployed">Unemployed</option>
                 </select>
               </Field>
               <Field label="Years Employed">
                 <input style={inputSt} type="number" min="0" value={retail.yearsEmployed}
                   onChange={e => setR('yearsEmployed', +e.target.value)} />
               </Field>
-              <Field label="Monthly Income (₦)">
-                <input style={inputSt} type="number" min="0" value={retail.monthlyIncome}
-                  onChange={e => setR('monthlyIncome', +e.target.value)} />
+              <Field label="Annual Income (₦)">
+                <input style={inputSt} type="number" min="0" value={retail.annualIncome}
+                  onChange={e => setR('annualIncome', +e.target.value)} />
               </Field>
-              <Field label="Existing Monthly Debt (₦)" hint="Rent, other loan repayments, etc.">
+              <Field label="Existing Monthly Debt (₦)" hint="Rent, loan repayments, etc.">
                 <input style={inputSt} type="number" min="0" value={retail.monthlyDebt}
                   onChange={e => setR('monthlyDebt', +e.target.value)} />
               </Field>
+            </div>
+
+            {/* Loan Details */}
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
+              textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
+              Loan Details
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 16, marginBottom: 20 }}>
               <Field label="Loan Amount (₦)">
                 <input style={inputSt} type="number" min="0" value={retail.loanAmount}
                   onChange={e => setR('loanAmount', +e.target.value)} />
@@ -190,23 +303,45 @@ export default function CreditApp() {
                 <input style={inputSt} type="number" min="0" step="0.1" value={retail.interestRate}
                   onChange={e => setR('interestRate', +e.target.value)} />
               </Field>
-              <Field label="Collateral Value (₦)" hint="0 = unsecured loan">
-                <input style={inputSt} type="number" min="0" value={retail.collateralValue}
-                  onChange={e => setR('collateralValue', +e.target.value)} />
-              </Field>
-              <Field label="Credit History">
-                <select style={inputSt} value={retail.creditHistory}
-                  onChange={e => setR('creditHistory', e.target.value as RetailInput['creditHistory'])}>
-                  <option value="excellent">Excellent</option>
-                  <option value="good">Good</option>
-                  <option value="fair">Fair</option>
-                  <option value="poor">Poor</option>
-                  <option value="none">None / New to credit</option>
+              <Field label="Loan Purpose">
+                <select style={inputSt} value={retail.loanPurpose}
+                  onChange={e => setR('loanPurpose', e.target.value as RetailInput['loanPurpose'])}>
+                  <option value="Home">Home</option>
+                  <option value="Auto">Auto</option>
+                  <option value="Education">Education</option>
+                  <option value="Business">Business</option>
+                  <option value="Other">Other</option>
                 </select>
               </Field>
-              <Field label="Prior Defaults">
-                <input style={inputSt} type="number" min="0" max="10" value={retail.priorDefaults}
-                  onChange={e => setR('priorDefaults', +e.target.value)} />
+              <Field label="Has Co-Signer">
+                <select style={inputSt} value={retail.hasCoSigner ? 'yes' : 'no'}
+                  onChange={e => setR('hasCoSigner', e.target.value === 'yes')}>
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
+              </Field>
+              <Field label="Has Mortgage">
+                <select style={inputSt} value={retail.hasMortgage ? 'yes' : 'no'}
+                  onChange={e => setR('hasMortgage', e.target.value === 'yes')}>
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
+              </Field>
+            </div>
+
+            {/* Credit Profile */}
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
+              textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
+              Credit Profile
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 16, marginBottom: 24 }}>
+              <Field label="Credit Score" hint="300 – 850">
+                <input style={inputSt} type="number" min="300" max="850" value={retail.creditScore}
+                  onChange={e => setR('creditScore', +e.target.value)} />
+              </Field>
+              <Field label="Number of Credit Lines">
+                <input style={inputSt} type="number" min="0" value={retail.numCreditLines}
+                  onChange={e => setR('numCreditLines', +e.target.value)} />
               </Field>
             </div>
           </>
@@ -222,38 +357,25 @@ export default function CreditApp() {
               border: '1px solid rgba(23,192,130,0.15)', borderRadius: 8,
               color: 'var(--muted)', fontSize: '0.82rem', lineHeight: 1.8 }}>
               <strong style={{ color: 'var(--text)' }}>Public firms</strong> — use market cap for equity.{' '}
-              <strong style={{ color: 'var(--text)' }}>Private firms</strong> — use book value of equity. Toggle below.
+              <strong style={{ color: 'var(--text)' }}>Private firms</strong> — use book value of equity.
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(210px,1fr))', gap: 16, marginBottom: 24 }}>
-              <Field label="Working Capital (₦)">
-                <input style={inputSt} type="number" value={altmanIn.workingCapital}
-                  onChange={e => setA('workingCapital', +e.target.value)} />
-              </Field>
-              <Field label="Total Assets (₦)">
-                <input style={inputSt} type="number" value={altmanIn.totalAssets}
-                  onChange={e => setA('totalAssets', +e.target.value)} />
-              </Field>
-              <Field label="Retained Earnings (₦)">
-                <input style={inputSt} type="number" value={altmanIn.retainedEarnings}
-                  onChange={e => setA('retainedEarnings', +e.target.value)} />
-              </Field>
-              <Field label="EBIT (₦)">
-                <input style={inputSt} type="number" value={altmanIn.ebit}
-                  onChange={e => setA('ebit', +e.target.value)} />
-              </Field>
-              <Field label="Market / Book Value of Equity (₦)">
-                <input style={inputSt} type="number" value={altmanIn.marketCapEquity}
-                  onChange={e => setA('marketCapEquity', +e.target.value)} />
-              </Field>
-              <Field label="Total Liabilities (₦)">
-                <input style={inputSt} type="number" value={altmanIn.totalLiabilities}
-                  onChange={e => setA('totalLiabilities', +e.target.value)} />
-              </Field>
-              <Field label="Revenue / Sales (₦)">
-                <input style={inputSt} type="number" value={altmanIn.revenue}
-                  onChange={e => setA('revenue', +e.target.value)} />
-              </Field>
+              {([
+                ['Working Capital (₦)',            'workingCapital'],
+                ['Total Assets (₦)',               'totalAssets'],
+                ['Retained Earnings (₦)',          'retainedEarnings'],
+                ['EBIT (₦)',                       'ebit'],
+                ['Market / Book Value of Equity (₦)', 'marketCapEquity'],
+                ['Total Liabilities (₦)',          'totalLiabilities'],
+                ['Revenue / Sales (₦)',            'revenue'],
+              ] as [string, keyof AltmanInput][]).map(([label, key]) => (
+                <Field key={key} label={label}>
+                  <input style={inputSt} type="number"
+                    value={altmanIn[key] as number}
+                    onChange={e => setA(key, +e.target.value as AltmanInput[typeof key])} />
+                </Field>
+              ))}
               <Field label="Company Type">
                 <select style={inputSt} value={altmanIn.listed ? 'listed' : 'private'}
                   onChange={e => setA('listed', e.target.value === 'listed')}>
@@ -274,7 +396,7 @@ export default function CreditApp() {
         )}
 
         <button className="btn-primary" onClick={handleScore} disabled={loading}>
-          {loading ? 'Scoring…' : tab === 'retail' ? 'Score Borrower' : 'Run Altman Z-Score'}
+          {loading ? 'Scoring…' : tab === 'retail' ? 'Run ML Credit Assessment' : 'Run Altman Z-Score'}
         </button>
 
         {/* ── Retail Results ── */}
@@ -282,7 +404,15 @@ export default function CreditApp() {
           <div id="result">
             <hr />
             <div className="section-label">Results</div>
-            <div className="section-title">Credit Assessment</div>
+            <div className="section-title">ML Credit Assessment</div>
+
+            {/* ML badge */}
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6,
+              background: 'rgba(23,192,130,0.08)', border: '1px solid rgba(23,192,130,0.2)',
+              borderRadius: 6, padding: '4px 12px', marginBottom: 20,
+              fontSize: '0.75rem', fontWeight: 700, color: ACCENT, letterSpacing: 0.5 }}>
+              ◆ XGBoost ML Model · 255,000+ training records
+            </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 20, marginBottom: 24 }}>
               {/* Gauge */}
@@ -302,7 +432,10 @@ export default function CreditApp() {
                   {retailResult.decision}
                 </div>
                 <div style={{ marginTop: 8, fontSize: '0.78rem', color: 'var(--muted)' }}>
-                  Est. PD: {retailResult.pd.toFixed(1)}%
+                  Default PD: {(retailResult.defaultProbability * 100).toFixed(1)}%
+                </div>
+                <div style={{ marginTop: 4, fontSize: '0.75rem', color: 'var(--faint)' }}>
+                  Risk: {retailResult.riskLevel}
                 </div>
               </div>
 
@@ -312,31 +445,17 @@ export default function CreditApp() {
                   textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>
                   Key Ratios
                 </div>
-                <KV k="Monthly EMI" v={fmt(retailResult.emi)}
-                  color={retailResult.emi / retail.monthlyIncome > 0.4 ? '#f87171' : ACCENT} />
+                <KV k="Monthly EMI" v={fmt(Math.round(retailResult.emi))}
+                  color={retailResult.emi / (retail.annualIncome / 12) > 0.4 ? '#f87171' : ACCENT} />
                 <KV k="Debt-to-Income (DTI)" v={`${retailResult.dti.toFixed(1)}%`}
                   color={retailResult.dti > 40 ? '#f87171' : retailResult.dti > 30 ? '#f59e0b' : ACCENT} />
                 <KV k="Debt Service Coverage (DSCR)" v={`${retailResult.dscr.toFixed(2)}x`}
                   color={retailResult.dscr >= 1.5 ? ACCENT : retailResult.dscr >= 1.0 ? '#f59e0b' : '#f87171'} />
-                {retail.collateralValue > 0 && (
-                  <KV k="Loan-to-Value (LTV)" v={`${retailResult.ltv.toFixed(1)}%`}
-                    color={retailResult.ltv <= 70 ? ACCENT : retailResult.ltv <= 85 ? '#f59e0b' : '#f87171'} />
-                )}
-                <KV k="Total Repayment" v={fmt(retailResult.emi * retail.tenureMonths)} />
-                <KV k="Interest Cost" v={fmt(retailResult.emi * retail.tenureMonths - retail.loanAmount)} />
+                <KV k="Credit Score" v={fmtN(retail.creditScore)}
+                  color={retail.creditScore >= 700 ? ACCENT : retail.creditScore >= 600 ? '#f59e0b' : '#f87171'} />
+                <KV k="Total Repayment" v={fmt(Math.round(retailResult.emi * retail.tenureMonths))} />
+                <KV k="Interest Cost" v={fmt(Math.round(retailResult.emi * retail.tenureMonths - retail.loanAmount))} />
               </div>
-            </div>
-
-            {/* Scorecard factors */}
-            <div className="card" style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
-                textTransform: 'uppercase', letterSpacing: 1, marginBottom: 18 }}>
-                Scorecard Breakdown
-              </div>
-              {retailResult.factors.map(f => (
-                <FactorBar key={f.factor} label={f.factor}
-                  points={f.points} max={f.max} comment={f.comment} />
-              ))}
             </div>
 
             {/* Narrative */}
@@ -347,9 +466,9 @@ export default function CreditApp() {
               </div>
               {retailResult.narrative.map((line, i) => (
                 <div key={i} style={{ display: 'flex', gap: 10, padding: '7px 0',
-                  borderBottom: i < retailResult.narrative.length-1 ? '1px solid var(--border)' : 'none' }}>
+                  borderBottom: i < retailResult.narrative.length - 1 ? '1px solid var(--border)' : 'none' }}>
                   <span style={{ color: ACCENT, fontWeight: 700, fontSize: '0.82rem', flexShrink: 0 }}>
-                    {String(i+1).padStart(2,'0')}
+                    {String(i + 1).padStart(2, '0')}
                   </span>
                   <span style={{ color: 'var(--muted)', fontSize: '0.86rem', lineHeight: 1.6 }}>{line}</span>
                 </div>
@@ -367,9 +486,9 @@ export default function CreditApp() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, marginBottom: 24 }}>
               {[
-                { label: 'Z-Score', value: altmanResult.z.toFixed(3), color: altmanResult.zoneColor },
-                { label: 'Zone', value: altmanResult.zone, color: altmanResult.zoneColor },
-                { label: 'Est. Distress PD', value: `${altmanResult.pd}%`, color: altmanResult.zoneColor },
+                { label: 'Z-Score',          value: altmanResult.z.toFixed(3),  color: altmanResult.zoneColor },
+                { label: 'Zone',             value: altmanResult.zone,           color: altmanResult.zoneColor },
+                { label: 'Est. Distress PD', value: `${altmanResult.pd}%`,      color: altmanResult.zoneColor },
               ].map(({ label, value, color }) => (
                 <div key={label} className="card" style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
@@ -379,23 +498,23 @@ export default function CreditApp() {
               ))}
             </div>
 
-            {/* X factors */}
             <div className="card" style={{ marginBottom: 20 }}>
               <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
                 textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>
                 Component Ratios
               </div>
               {(['x1','x2','x3','x4','x5'] as const).map((k, i) => {
-                const labels = ['X1 — Working Capital / Total Assets',
+                const labels = [
+                  'X1 — Working Capital / Total Assets',
                   'X2 — Retained Earnings / Total Assets',
                   'X3 — EBIT / Total Assets',
                   'X4 — Equity / Total Liabilities',
-                  'X5 — Revenue / Total Assets']
+                  'X5 — Revenue / Total Assets',
+                ]
                 return <KV key={k} k={labels[i]} v={altmanResult[k].toFixed(4)} />
               })}
             </div>
 
-            {/* Narrative */}
             <div className="card">
               <div style={{ fontSize: '0.72rem', fontWeight: 700, color: ACCENT,
                 textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>
@@ -403,9 +522,9 @@ export default function CreditApp() {
               </div>
               {altmanResult.narrative.map((line, i) => (
                 <div key={i} style={{ display: 'flex', gap: 10, padding: '7px 0',
-                  borderBottom: i < altmanResult.narrative.length-1 ? '1px solid var(--border)' : 'none' }}>
+                  borderBottom: i < altmanResult.narrative.length - 1 ? '1px solid var(--border)' : 'none' }}>
                   <span style={{ color: ACCENT, fontWeight: 700, fontSize: '0.82rem', flexShrink: 0 }}>
-                    {String(i+1).padStart(2,'0')}
+                    {String(i + 1).padStart(2, '0')}
                   </span>
                   <span style={{ color: 'var(--muted)', fontSize: '0.86rem', lineHeight: 1.6 }}>{line}</span>
                 </div>
@@ -421,7 +540,7 @@ export default function CreditApp() {
             <span style={{ color: 'var(--muted)', fontWeight: 700, fontSize: '0.85rem' }}>
               Muhammed Adediran
             </span><br/>
-            Financial Data Analyst · Credit Risk · Quantitative Modelling
+            Quantitative AI Engineer · Credit Risk · Financial Data Scientist
           </div>
           <a href="https://adediran.xyz/contact" target="_blank" rel="noreferrer"
             style={{ color: ACCENT, fontWeight: 600, fontSize: '0.85rem',
